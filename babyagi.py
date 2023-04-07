@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 import os
 import openai
-import pinecone
+# import pinecone
 import time
 import sys
 from collections import deque
 from typing import Dict, List
 from dotenv import load_dotenv
 import os
+import chromadb
+from chromadb.config import Settings
 
 #Set Variables
 load_dotenv()
@@ -21,11 +23,11 @@ USE_GPT4 = False
 if USE_GPT4:
     print("\033[91m\033[1m"+"\n*****USING GPT-4. POTENTIALLY EXPENSIVE. MONITOR YOUR COSTS*****"+"\033[0m\033[0m")
 
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
-assert PINECONE_API_KEY, "PINECONE_API_KEY environment variable is missing from .env"
+# PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
+# assert PINECONE_API_KEY, "PINECONE_API_KEY environment variable is missing from .env"
 
-PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT", "us-east1-gcp")
-assert PINECONE_ENVIRONMENT, "PINECONE_ENVIRONMENT environment variable is missing from .env"
+# PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT", "us-east1-gcp")
+# assert PINECONE_ENVIRONMENT, "PINECONE_ENVIRONMENT environment variable is missing from .env"
 
 # Table config
 YOUR_TABLE_NAME = os.getenv("TABLE_NAME", "")
@@ -44,28 +46,32 @@ print(OBJECTIVE)
 
 # Configure OpenAI and Pinecone
 openai.api_key = OPENAI_API_KEY
-pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_ENVIRONMENT)
-
-# Create Pinecone index
+# pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_ENVIRONMENT)
+chroma_client = chromadb.Client(Settings(chroma_db_impl="duckdb+parquet", persist_directory="db"))
+chroma_client.reset()
+# Create Chroma collection
 table_name = YOUR_TABLE_NAME
-dimension = 1536
-metric = "cosine"
-pod_type = "p1"
-if table_name not in pinecone.list_indexes():
-    pinecone.create_index(table_name, dimension=dimension, metric=metric, pod_type=pod_type)
+# dimension = 1536
+# metric = "cosine"
+# pod_type = "p1"
 
-# Connect to the index
-index = pinecone.Index(table_name)
+collection = chroma_client.get_or_create_collection(table_name)
+# Init collection with first task
+collection.add(
+    documents=[YOUR_FIRST_TASK],
+    metadatas=[{"objective": OBJECTIVE, "task": YOUR_FIRST_TASK}],
+    ids=["init_task"]
+)
+
+
+# Connect to the collection
+# collection = chroma_client.get_collection(table_name)
 
 # Task list
 task_list = deque([])
 
 def add_task(task: Dict):
     task_list.append(task)
-
-def get_ada_embedding(text):
-    text = text.replace("\n", " ")
-    return openai.Embedding.create(input=[text], model="text-embedding-ada-002")["data"][0]["embedding"]
 
 def openai_call(prompt: str, use_gpt4: bool = False, temperature: float = 0.5, max_tokens: int = 100):
     if not use_gpt4:
@@ -118,19 +124,37 @@ def prioritization_agent(this_task_id:int, gpt_version: str = 'gpt-3'):
             task_list.append({"task_id": task_id, "task_name": task_name})
 
 def execution_agent(objective:str,task: str, gpt_version: str = 'gpt-3') -> str:
-    context=context_agent(query=objective, n=5)
+    total = collection.count()
+    if total > 5:
+        total = 5
+    context=context_agent(query=objective, n=total)
     #print("\n*******RELEVANT CONTEXT******\n")
     #print(context)
     prompt =f"You are an AI who performs one task based on the following objective: {objective}.\nTake into account these previously completed tasks: {context}\nYour task: {task}\nResponse:"
     return openai_call(prompt, USE_GPT4, 0.7, 2000)
 
+def query_collection(query_texts, n_results):
+    result = collection.query(query_texts=query_texts, n_results=n_results)
+    result_list = []
+    # Convert the results into a list of dictionaries
+    for i in range(len(result['ids'][0])):
+        result_dict = dict(
+            id=result['ids'][0][i],
+            document=result['documents'][0][i], 
+            metadata=result['metadatas'][0][i],
+            distance=result['distances'][0][i]
+        )
+        result_list.append(result_dict)
+    return result_list
+
+
 def context_agent(query: str, n: int):
-    query_embedding = get_ada_embedding(query)
-    results = index.query(query_embedding, top_k=n, include_metadata=True)
+    results = query_collection(query_texts=[query], n_results=n)
     #print("***** RESULTS *****")
-    #print(results)
-    sorted_results = sorted(results.matches, key=lambda x: x.score, reverse=True)    
-    return [(str(item.metadata['task'])) for item in sorted_results]
+    print(results)
+    sorted_results = sorted(results, key=lambda x: x['distance'], reverse=True)   
+
+    return [(str(item['metadata']['task'])) for item in sorted_results]
 
 # Add the first task
 first_task = {
@@ -163,7 +187,12 @@ while True:
         enriched_result = {'data': result}  # This is where you should enrich the result if needed
         result_id = f"result_{task['task_id']}"
         vector = enriched_result['data']  # extract the actual result from the dictionary
-        index.upsert([(result_id, get_ada_embedding(vector),{"task":task['task_name'],"result":result})])
+        # index.upsert([(result_id, get_ada_embedding(vector),{"task":task['task_name'],"result":result})])
+        collection.add(
+            documents=[vector],
+            metadatas=[{"task": task['task_name'], "result": result}],
+            ids=[result_id]
+        )
 
     # Step 3: Create new tasks and reprioritize task list
     new_tasks = task_creation_agent(OBJECTIVE,enriched_result, task["task_name"], [t["task_name"] for t in task_list])
