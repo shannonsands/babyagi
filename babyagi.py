@@ -51,9 +51,6 @@ chroma_client = chromadb.Client(Settings(chroma_db_impl="duckdb+parquet", persis
 chroma_client.reset()
 # Create Chroma collection
 table_name = YOUR_TABLE_NAME
-# dimension = 1536
-# metric = "cosine"
-# pod_type = "p1"
 
 collection = chroma_client.get_or_create_collection(table_name)
 # Init collection with first task
