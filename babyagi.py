@@ -10,18 +10,19 @@ from dotenv import load_dotenv
 import os
 import chromadb
 from chromadb.config import Settings
+from pyllamacpp.model import Model
 
 #Set Variables
 load_dotenv()
 
 # Set API Keys
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-assert OPENAI_API_KEY, "OPENAI_API_KEY environment variable is missing from .env"
+# OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+# assert OPENAI_API_KEY, "OPENAI_API_KEY environment variable is missing from .env"
 
-# Use GPT-3 model
-USE_GPT4 = False
-if USE_GPT4:
-    print("\033[91m\033[1m"+"\n*****USING GPT-4. POTENTIALLY EXPENSIVE. MONITOR YOUR COSTS*****"+"\033[0m\033[0m")
+# # Use GPT-3 model
+# USE_GPT4 = False
+# if USE_GPT4:
+#     print("\033[91m\033[1m"+"\n*****USING GPT-4. POTENTIALLY EXPENSIVE. MONITOR YOUR COSTS*****"+"\033[0m\033[0m")
 
 # PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
 # assert PINECONE_API_KEY, "PINECONE_API_KEY environment variable is missing from .env"
@@ -45,7 +46,7 @@ print("\033[96m\033[1m"+"\n*****OBJECTIVE*****\n"+"\033[0m\033[0m")
 print(OBJECTIVE)
 
 # Configure OpenAI and Pinecone
-openai.api_key = OPENAI_API_KEY
+# openai.api_key = OPENAI_API_KEY
 # pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_ENVIRONMENT)
 chroma_client = chromadb.Client(Settings(chroma_db_impl="duckdb+parquet", persist_directory="db"))
 chroma_client.reset()
@@ -60,15 +61,23 @@ collection.add(
     ids=["init_task"]
 )
 
-
 # Connect to the collection
 # collection = chroma_client.get_collection(table_name)
-
+llama = Model(ggml_model='./models/gpt4all-converted.bin', n_ctx=512)
 # Task list
 task_list = deque([])
 
 def add_task(task: Dict):
     task_list.append(task)
+
+def llama_call(prompt: str, temperature: float = 0.5, max_tokens: int = 100):
+    # new_text_callback=new_text_callback,
+    response = llama.generate(
+        prompt,
+        n_predict=max_tokens,
+        n_threads=8
+    )
+    return response
 
 def openai_call(prompt: str, use_gpt4: bool = False, temperature: float = 0.5, max_tokens: int = 100):
     if not use_gpt4:
@@ -98,7 +107,7 @@ def openai_call(prompt: str, use_gpt4: bool = False, temperature: float = 0.5, m
 
 def task_creation_agent(objective: str, result: Dict, task_description: str, task_list: List[str], gpt_version: str = 'gpt-3'):
     prompt = f"You are an task creation AI that uses the result of an execution agent to create new tasks with the following objective: {objective}, The last completed task has the result: {result}. This result was based on this task description: {task_description}. These are incomplete tasks: {', '.join(task_list)}. Based on the result, create new tasks to be completed by the AI system that do not overlap with incomplete tasks. Return the tasks as an array."
-    response = openai_call(prompt, USE_GPT4)
+    response = llama_call(prompt)
     new_tasks = response.split('\n')
     return [{"task_name": task_name} for task_name in new_tasks]
 
@@ -110,7 +119,7 @@ def prioritization_agent(this_task_id:int, gpt_version: str = 'gpt-3'):
     #. First task
     #. Second task
     Start the task list with number {next_task_id}."""
-    response = openai_call(prompt, USE_GPT4)
+    response = llama_call(prompt)
     new_tasks = response.split('\n')
     task_list = deque()
     for task_string in new_tasks:
@@ -128,7 +137,7 @@ def execution_agent(objective:str,task: str, gpt_version: str = 'gpt-3') -> str:
     #print("\n*******RELEVANT CONTEXT******\n")
     #print(context)
     prompt =f"You are an AI who performs one task based on the following objective: {objective}.\nTake into account these previously completed tasks: {context}\nYour task: {task}\nResponse:"
-    return openai_call(prompt, USE_GPT4, 0.7, 2000)
+    return llama_call(prompt, 0.7, 2048)
 
 def query_collection(query_texts, n_results):
     result = collection.query(query_texts=query_texts, n_results=n_results)
